@@ -1,0 +1,415 @@
+---
+title: "Les accidents de la circulation de 2005 à 2016 visualisés avec R"
+date: 2017-11-14
+output: html_document
+---
+
+```{r, include = FALSE}
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(jsonlite)
+library(ggmap)
+
+knitr::opts_chunk$set(
+  warning = FALSE,
+  fig.width = 6,
+  fig.asp = 0.618,
+  out.width = "80%",
+  fig.align = "center"
+)
+```
+
+En plein apprentissage de [R](https://cran.r-project.org/), je vais essayer de mettre en pratique mes connaissances nouvellement acquises au travers d'une mini-étude basique sur les données des accidents corporels de la circulation en France entre 2005 et 2016. Mon objectif n'est pas d'étudier en profondeur ces données (cela demanderait beaucoup plus de temps, d'analyses et de croisements avec d'autres informations !), mais simplement d'approfondir l'utilisation de certains packages R, notamment {ggplot2} et {ggmap} pour les charts. Comme c'est en faisant des erreurs que l'on apprend, n'hésitez pas à me faire part via les commentaires des éventuelles coquilles que vous pourriez déceler. **Tentons donc de mettre en exergue quelques tendances sur les accidents de la route ...**
+
+Le code source (au format R Markdown) est disponible sur [Github](https://github.com/neveldo/rstats-accidents). Si vous voulez en apprendre davantage sur les différents packages utilisés ({readr}, {dyplr}, {ggplot2}, etc), n’hésitez pas à jeter un œil au très bon livre [R for data science](http://r4ds.had.co.nz/).
+
+Les données des accidents de la circulation sont publiés en Open Data sur la plateforme [data.gouv.fr](https://www.data.gouv.fr/fr/datasets/base-de-donnees-accidents-corporels-de-la-circulation/) . Commençons par apporter quelques précisions sur ces données :
+
+- Elles ne concernent que les accidents corporels de la circulation, c'est-à-dire les accidents "survenus sur une voie ouverte à la circulation publique, impliquant au moins un véhicule et ayant fait au moins une victime ayant nécessité des soins" (donc exit tous les petits accrocs sans gravité)
+- Les données couvrent 12 années allant de 2005 à 2016
+- Pour un accident, les informations sont réparties au travers de 4 jeux de données distincts : on a ses caractéristiques, les véhicules impliqués, les usagers ainsi que des détails sur le lieu
+- Les données sont réparties en 48 datasets et totalisent 4 989 364 observations
+
+# Import et nettoyage des données
+
+Avant toute manipulation ou visualisation des données, il faut au préalable les importer et les nettoyer. J'ai d'abord commencé à explorer les accidents en important les 4 datasets d'une année en particulier. Cette méthode fonctionne bien lorsque l'étude porte sur quelques jeux de données, mais quand il s'agit d'explorer un grand nombre de fichiers, comme par exemple dans notre cas avec les 48 datasets des accidents, il faut réfléchir à un moyen d'automatiser les imports. 
+
+Sur data.gouv.fr, la liste des fichiers d'un jeu de données (et leurs métadonnées comme la date de dernière modification, etc) est disponible au format RDF sous différentes sérialisations : [RDF/XML](https://www.w3schools.com/xml/xml_rdf.asp), [Turtle](https://www.w3.org/TR/turtle/), [JSON-LD](https://www.w3.org/TR/json-ld/), [Trig](https://www.w3.org/TR/trig/) ou encore [N3](https://www.w3.org/TeamSubmission/n3/). On peut retrouver toutes ces versions dans les `<link rel="alternate" ...>` dans la source de la [page du jeu de données](https://www.data.gouv.fr/fr/datasets/base-de-donnees-accidents-corporels-de-la-circulation/). On va exploiter la version [JSON-LD](https://www.data.gouv.fr/datasets/53698f4ca3a729239d2036df/rdf.json) avec le package {jsonlite}.
+
+Voici un aperçu des informations qui nous intéressent dans ce JSON-LD : 
+
+```{r}
+datasetsList <- fromJSON('https://www.data.gouv.fr/datasets/53698f4ca3a729239d2036df/rdf.json')$`@graph` %>%
+  select(title, downloadURL) %>%
+  filter(str_detect(title, 'caracteristiques_|lieux_|usagers_|vehicules_'))
+```
+
+```{r, echo = FALSE}
+knitr::kable(datasetsList[1:5, ], caption = 'Contenu de datasetsList')
+```
+
+Cette collection va donc permettre d'importer facilement tous les datasets de façon automatisée. L'objectif est d'obtenir in fine un data.frame pour chacune des 4 catégories de données : caractéristiques, véhicules, usagers et lieux. Chaque data.frame contiendra ainsi la fusion de toutes les années de données disponibles. J'ai créé une fonction nommée `importDatasetsByTitle()` qui va nous permettre d’importer et de fusionner tous les fichiers d’accidents en les filtrant par leurs titres (thématiques) :
+
+``` {r}
+#' Returns a data.frame that contains all the rows from the data files for a specific dataset provided by the data.gouv.fr platform
+# All the rows from the datasets whose the titles match 'titleFilter' will be merged together
+#' @param datasetId The dataset ID from data.gouv.fr. It can be found within the source code of the dataset page within the "@id" attribute
+#' @param titleFilter The string for filtering the datasets titles in order to select only the relevant ones
+#' @param colTypes The column specification created through cols()
+#' @param delim Single character used to separate fields within a record
+#' @param stringLocale The datasets locale
+#' @return The data.frame for the specified accidents category
+importDatasetsByTitle <- function(datasetId, titleFilter, colTypes, delim = ',', stringLocale = locale(encoding = "Latin1")) {
+  filteredDatasets <- fromJSON(paste('https://www.data.gouv.fr/datasets/', datasetId, '/rdf.json', sep=''))$`@graph` %>%
+    select(title, downloadURL) %>% 
+    filter(str_detect(title, titleFilter)) %>%
+    mutate(dataset = map2(downloadURL, delim, read_delim, locale = stringLocale, col_types = colTypes)) 
+  
+  bind_rows(filteredDatasets$dataset)
+}
+```
+Note : La fonction `importDatasetsByTitle()` peut tout à fait être utilisée pour importer et fusionner d'autres jeux de données sur datagouv.fr.
+
+Les fichiers sont globalement propres, mais j'ai tout de même noté ces quelques points :
+
+- Un seul des 48 fichiers, `caracteristiques_2009.csv`, est au format TSV, allez comprendre pourquoi ... J'ai géré cette exception avec le paramètre `tsvTitleFilter` dans la fonction `importDatasetsByTitle()`
+- Les dates sont dispersées sur 4 colonnes : `an`, `mois`, `jour` et `hhmm`
+- Les heures et minutes des accidents sont concaténées dans une seule colonne, avec omission des `0` devant les heures de 00 à 09 et devant les minutes de 01 à 09. La documentation n’étant pas claire sur ce point, il faut donc à priori faire notre propre interprétation lorsque l’on est face à des valeurs du type ‘45’ : s’agit-il de 04:05 ou de 04:50 ? Ou encore la valeur ‘1’ correspond à 00:01 ou à 01:00 ?
+
+La fonction `toDate()` va nous permettre de reconstruire un objet datetime à partir des différentes variables : 
+
+``` {r toDate}
+#' Convert year, month, day and hm variables into a valid date object
+#' @param year
+#' @param month
+#' @param day
+#' @param hm concatenated hours and minutes
+toDate <- function(year, month, day, hm) {
+  date <- str_c('20', str_pad(year, 2, "left", "0"), '-', str_pad(month, 2, "left", "0"), '-', str_pad(day, 2, "left", "0"), ' ')
+  
+  if (str_length(hm) == 1) {
+    hm <- str_c('0', hm, ':00')
+  } else if (str_length(hm) == 2) {
+    hm <- str_c('0', str_sub(hm, 1, 1), ':0', str_sub(hm, 2, 2))
+  } else if (str_length(hm) == 3 && str_sub(hm, 1, 1) != 0) {
+    hm <- str_c('0', str_sub(hm, 1, 1), ':', str_sub(hm, 2, 3))
+  } else if (str_length(hm) == 3 && str_sub(hm, 1, 1) == 0) {
+    hm <- str_c(str_sub(hm, 1, 2), ':0', str_sub(hm, 3, 3))
+  } else {
+    hm <- str_c(str_sub(hm, 1, 2), ':', str_sub(hm, 3, 4))
+  }
+  
+  str_c(date, ' ', hm)
+}
+# Note : il est sûrement possible de faire quelque chose de plus propre et de plus optimisé pour formater les heures et minutes correctement ...
+```
+
+Importons maintenant les données pour chacune des 4 thématiques :
+
+``` {r wrangling}
+datasetId <- '53698f4ca3a729239d2036df'
+
+specificationsCols <-   cols(
+  Num_Acc = col_character(),
+  com = col_character(),
+  lat = col_double(),
+  long = col_double(),
+  dep = col_character()
+)
+accidentsSpecifications <- importDatasetsByTitle(datasetId, 'caracteristiques_(?!2009)', specificationsCols) 
+
+# Handle 2009 file (in TSV format ...)
+accidentsSpecifications2009 <- read_delim(
+  'https://www.data.gouv.fr/s/resources/base-de-donnees-accidents-corporels-de-la-circulation/20160422-111851/caracteristiques_2009.csv', 
+  '\t', 
+  locale = locale(encoding = "Latin1"), 
+  col_types = specificationsCols
+)
+accidentsSpecifications <- bind_rows(accidentsSpecifications, accidentsSpecifications2009)
+
+# Add some alternative date formats to accidentSpecifications data.frame, it will be needed for the charts below
+accidentsSpecifications <- mutate(accidentsSpecifications,
+    datetime = ymd_hm(pmap(list(an, mois, jour, hrmn), toDate)), 
+    date = as.Date(datetime),
+    year = year(date),
+    wday = wday(date, label = TRUE),
+    hour = hour(datetime),
+    weekdayshours = update(datetime, year = 2017, month = 01, day = wday(date), minute = 0)
+  )
+
+accidentsLocations <- importDatasetsByTitle(
+  datasetId, 
+  'lieux_', 
+  cols(
+    Num_Acc = col_character(),
+    voie = col_character(),
+    v1 = col_character()
+  )
+) %>% inner_join(accidentsSpecifications, by = "Num_Acc")
+
+accidentsUsers <- importDatasetsByTitle(
+  datasetId, 
+  'usagers_',
+  cols(
+    Num_Acc = col_character(),
+    secu = col_character()
+  )
+) %>% inner_join(accidentsSpecifications, by = "Num_Acc")
+  
+accidentsVehicles <- importDatasetsByTitle(
+  datasetId, 
+  'vehicules_',
+  cols(
+    Num_Acc = col_character()
+  )
+) %>% inner_join(accidentsSpecifications, by = "Num_Acc")
+
+```
+
+Maintenant que nous avons chargé les données dans des data.frame, essayons d'en visualiser quelques grandes tendances.
+
+# Evolution du nombre d'accidents et du nombre de morts sur la route
+
+``` {r}
+accidentsSpecifications %>%
+  ggplot(aes(x = year)) +
+  geom_bar(fill = "#3e4c63") +
+  labs(
+    title = "Le nombre d'accidents de la circulation baisse jusqu'en 2013 \npuis semble stagner ensuite",
+    x = "Année",
+    y = "Nombre d'accidents corporels \nde la circulation en France"
+  ) +
+  theme_minimal()
+
+accidentsUsers %>%
+  filter(grav == 2) %>%
+  ggplot(aes(x = year)) +
+  geom_bar(fill = "#3e4c63") +
+  labs(
+    title = "Le nombre de morts sur la route baisse jusqu'en 2013 \npuis semble être en légère augmentation ensuite",
+    x = "Année",
+    y = "Nombre de morts sur la route en France"
+  ) +
+  theme_minimal()
+```
+
+``` {r}
+accidentsSpecifications %>%
+  group_by(date) %>%
+  summarize(nb_accidents = n()) %>%
+  mutate(date = update(date, year = 2017)) %>%
+  group_by(date) %>%
+  summarize(nb_accidents = mean(nb_accidents)) %>%
+  ggplot(aes(x = date, y = nb_accidents, group = 1)) +
+  geom_line(color = "#3e4c63") +
+  labs(
+    title = "Il y a moins d'accidents en août et \n pendant les fêtes de fin d'année",
+    x = "Jour de l'année",
+    y = "Nombre moyen d'accidents \npar jour"
+  ) +
+  theme_minimal() +
+  scale_x_date(date_labels = "%B")
+
+top10 <- accidentsSpecifications %>%
+  group_by(date) %>%
+  summarize(nb_accidents = n()) %>%
+  mutate(date = update(date, year = 2017)) %>%
+  group_by(date) %>%
+  summarize(nb_accidents = mean(nb_accidents)) %>%
+  arrange(nb_accidents) %>%
+  filter(row_number() <= 10)
+```
+```{r, echo = FALSE}
+knitr::kable(top10, caption = "Top 10 des jours de l'année avec, en moyenne, le moins d'accidents")
+```
+
+Attention, cela ne veut pas dire que les usagers de la route sont plus prudents pendant les vacances. Cela peut s'expliquer probablement et au moins en partie par le fait qu'il y a globalement moins de circulation durant les périodes de vacances, et donc moins d'accidents.
+
+Il est également intéressant d'observer cette courbe par département. On peut voir par exemple qu'en été, le nombre d'accidents baisse sensiblement à Paris alors que dans la même période, il augmente dans le var.
+
+## Accidents et morts en fonction de l'heure de la journée et du jour de la semaine
+
+``` {r}
+dayHours <- c(7:23, 0:6)
+dayHoursLabels <- c('07', '08', '09', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '00', '01', '02', '03', '04', '05', '06')
+
+accidentsSpecifications %>%
+  mutate(datetime = update(datetime, minutes = 0, seconds = 0)) %>%
+  group_by(datetime) %>%
+  summarize(nb_accidents = n()) %>%
+  mutate(hour = hour(datetime)) %>%
+  group_by(hour) %>%
+  summarize(nb_accidents = mean(nb_accidents)) %>%
+  mutate(hour = factor(hour, levels = dayHours, labels = dayHoursLabels)) %>%
+  ggplot(aes(x = hour, y = nb_accidents, group = 1)) +
+  geom_col(fill = "#3e4c63") +
+  labs(
+    title = "Il y a plus d'accidents de la circulation entre 17h et 19h",
+    x = "Heure de la journée",
+    y = "Nombre moyen d'accidents par heure"
+  ) +
+  theme_minimal()
+```
+On voit un premier pic entre 8h et et 10h, puis un second beaucoup plus prononcé entre 17h et 19h. On peut supposer que ces pics correspondent aux allers et retours entre le domicile et le lieu de travail pendant lesquels le nombre de véhicules en circulation est globalement beaucoup plus important que sur le reste de la journée.
+
+Il serait intéressant de comprendre pourquoi le pic des retours est beaucoup plus important que le pic des allers.
+
+``` {r}
+inner_join(
+  accidentsUsers %>%
+    filter(grav == 2) %>%
+    group_by(hour) %>%
+    summarize(nb_deathlyaccidents = n_distinct(Num_Acc)),
+  accidentsSpecifications %>%
+    group_by(hour) %>%
+    summarize(nb_accidents = n_distinct(Num_Acc)),
+  by = 'hour'
+) %>%
+  mutate(deathly_accidents_percentage = 100 * (nb_deathlyaccidents / nb_accidents)) %>%
+  mutate(hour = factor(hour, levels = dayHours, labels = dayHoursLabels)) %>%
+  ggplot(aes(x = hour, y = deathly_accidents_percentage, group = 1)) +
+  geom_col(fill = "#3e4c63") +
+  labs(
+    title = "Le pourcentage d'accidents mortels connait un pic \nentre minuit et 7h",
+    x = "Heure de la journée",
+    y = "Pourcentage d'accidents mortels"
+  ) +
+  theme_minimal()
+```
+
+Le taux d'accidents mortels connait un pic entre minuit et 7h. Là aussi, nous pouvons émettre quelques hypothèses : visibilité moindre, fatigue, une plage horaire plus propice à des comportements à risques (retours de soirée, etc).
+
+``` {r}
+
+inner_join(
+  accidentsUsers %>%
+    filter(grav == 2) %>%
+    group_by(wday) %>%
+   summarize(nb_deathly_accidents = n_distinct(Num_Acc)),
+  accidentsSpecifications %>%
+    group_by(wday) %>%
+    summarize(nb_accidents = n()),
+  by = 'wday'
+) %>%
+  mutate(wday = factor(wday, levels=c('Mon', 'Tues', 'Wed', 'Thurs', 'Fri', 'Sat', 'Sun'), labels =  c('Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche'))) %>%
+  mutate(deathly_accidents_percentage = 100 * (nb_deathly_accidents / nb_accidents)) %>%
+  ggplot(aes(x = wday, y = deathly_accidents_percentage, group = 1)) +
+  geom_col(fill = "#3e4c63") +
+  labs(
+    title = "Le pourcentage d'accidents mortels est plus important le week-end",
+    x = "Jour de la semaine",
+    y = "Pourcentage d'accidents mortels"
+  ) +
+  theme_minimal()
+```
+Là aussi, on peut imaginer que le plus fort taux d'accidents mortels durant le week-end est en partie dû au fait que cette période de la semaine est plus propice à des comportements à risques (retours de soirée, etc) mais il y a probablement d'autres facteurs qui entrent en jeu.
+
+## Les graphiques à prendre avec des pincettes : les accidents en fonction de l'âge et du sexe
+
+``` {r}
+accidentsUsers %>%
+  filter(grav == 2) %>%
+  mutate(age = year(now()) - an_nais) %>%
+  group_by(year, age) %>%
+  summarise(accidenteds_number = n()) %>%
+  group_by(age) %>%
+  summarize(accidenteds_number = mean(accidenteds_number)) %>%
+  ggplot(aes(x = age, y = accidenteds_number, group = 1)) +
+  geom_vline(aes(xintercept = 25), colour = "#ccd7ea", size = 1) +
+  geom_vline(aes(xintercept = 35), size = 1, colour = "#ccd7ea") +
+  geom_line(color = "#3e4c63", size = 1.5) +
+  labs(
+    title = "Il y a le plus de décès sur la route \n dans la tranche des 25 - 30 ans",
+    x = "Age",
+    y = "Nombre annuel moyen de morts sur \n la route en fonction de l'age"
+  ) +
+  theme_minimal()
+```
+Le nombre de morts moyen est plus important dans la tranche des 25 - 30 ans. Attention, cela ne veut pas dire que cette tranche est plus à risque que les autres. En effet, on peut supposer que les usagers de cette tranche d'âge sont simplement les plus présents la route, d’où le nombre d’accidents plus important pour cette tranche. 
+
+``` {r}
+accidentsUsers %>%
+  filter(catu == 1) %>%
+  group_by(year, sexe) %>%
+  summarize(accidenteds_number = n()) %>%
+  group_by(sexe) %>%
+  summarize(accidenteds_number = mean(accidenteds_number)) %>%
+  mutate(sexe = factor(sexe, labels = c('Homme', 'Femme'))) %>%
+  ggplot(aes(x = sexe, fill = sexe, y = accidenteds_number)) + 
+  geom_col() +
+  scale_fill_manual(values = c("#2b8cbe", "#fa9fb5")) +
+  guides(fill=FALSE) +
+  labs(
+    title = "Il y a moins d'accidents impliquant \n des femmes que des hommes",
+    x = "Sexe",
+    y = "Nombre annuel moyen d'accidents \n de la route par sexe"
+  ) +
+  theme_minimal()
+```
+
+Là encore, attention, cela ne veut pas dire que les femmes conduisent mieux que les hommes. Les hommes sont peut-être simplement globalement plus présents sur la route que les femmes. On peut notamment trouver quelques informations à ce sujet dans une [enquête de 2013 réalisée par l'Observatoire de la mobilité en Île-de-France](http://www.omnil.fr/IMG/pdf/egt2010_femmes_hommes_bd-2.pdf).
+
+## Quelques cartographies ...
+
+``` {r}
+
+deathsData <- accidentsSpecifications %>%
+  inner_join(accidentsUsers) %>%
+  filter(grav == 2) %>%
+  filter(!is.na(lat) & !is.na(long) & lat != 0 & long != 0) %>%
+  mutate(lat = lat / 100000, long = long / 100000) %>%
+  filter(lat > 40 & long < 15) %>%
+  select(Num_Acc, lat, long)
+
+ggplot(deathsData) + 
+  geom_polygon(data = map_data("france"), aes(x=long, y = lat, group = group), fill = "#e5e5e5") + 
+  geom_point(deathsData, mapping = aes(x = long, y = lat), size = 0.1, color = "#3e4c63", alpha = 0.3) +
+  coord_fixed(1.3) +
+    labs(
+    title = "Personnes décédées à la suite d'un accident \n de la circulation"
+  ) +
+  theme_void()
+
+bikeAccidentsData <- accidentsSpecifications %>%
+  inner_join(accidentsVehicles) %>%
+  inner_join(accidentsUsers) %>%
+  filter(catv == '01') %>%
+  filter(dep == '750') %>%
+  mutate(lat = lat / 100000, long = long / 100000) %>%
+  mutate(grav = factor(grav, levels = c(1,4,3,2), labels = c('Indemne', 'Blessé léger', 'Blessé hospitalisé', 'Tué'))) %>%
+  select(Num_Acc, grav, lat, long)
+
+ggmap(get_map(location = c(lon = 2.3488, lat = 48.8534), source = "google", zoom = 12)) +
+  geom_point(data = bikeAccidentsData, mapping = aes(x = long, y = lat, fill = grav), colour="#000000", size = 3, pch=21) +
+  labs(
+    title = "Les accidents de vélo à Paris selon la gravité",
+    fill = "Gravité"
+  ) +
+  theme_void() +
+  scale_fill_brewer(palette = "Reds", na.value = "#bababa") +
+  theme(legend.position="bottom")
+
+```
+
+La première carte n’a que très peu d’intérêt puisque les zones où l’on retrouve le plus d’accidents correspondent bien sûr aux grands axes routiers ainsi qu’aux grandes villes. Il peut être en revanche intéressant de visualiser les accidents de la route par commune, voire par quartier pour identifier des axes dangereux par exemple.
+
+## Points de chocs sur les voitures
+
+``` {r}
+accidentsVehicles %>%
+  filter(catv == '07') %>%
+  mutate(choc = factor(choc, levels = rev(c(1,3,2,4,6,5,8,7,9)), labels = rev(c('Avant','Avant gauche','Avant droit','Arrière','Arrière gauche','Arrière droit','Côté gauche','Côté droit','Chocs multiples (tonneaux)')))) %>%
+  group_by(choc) %>%
+  summarize(accidenteds_number = n()) %>%
+  filter(!is.na(choc)) %>%
+  ggplot(aes(x = choc, y = accidenteds_number)) + 
+  geom_col(fill = "#3e4c63") +
+  labs(
+    title = "Le point de choc le plus fréquent est \n l\'avant du véhicule",
+    x = "Point de choc",
+    y = "Nombre de voitures"
+  ) +
+  theme_minimal() +
+  coord_flip()
+```

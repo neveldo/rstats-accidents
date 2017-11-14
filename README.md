@@ -1,0 +1,1 @@
+Some charts built with R about car accidents in France between 2005 and 2016. The datasets can be found on the [data.gouv.fr platform](https://www.data.gouv.fr/fr/datasets/base-de-donnees-accidents-corporels-de-la-circulation/).
