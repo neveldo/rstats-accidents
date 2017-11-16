@@ -1,6 +1,5 @@
 ---
 title: "Les accidents de la circulation de 2005 à 2016 visualisés avec R"
-date: 2017-11-14
 output: html_document
 ---
 
@@ -75,7 +74,7 @@ Les fichiers sont globalement propres, mais j'ai tout de même noté ces quelque
 
 - Un seul des 48 fichiers, `caracteristiques_2009.csv`, est au format TSV, allez comprendre pourquoi ... J'ai géré cette exception avec le paramètre `tsvTitleFilter` dans la fonction `importDatasetsByTitle()`
 - Les dates sont dispersées sur 4 colonnes : `an`, `mois`, `jour` et `hhmm`
-- Les heures et minutes des accidents sont concaténées dans une seule colonne, avec omission des `0` devant les heures de 00 à 09 et devant les minutes de 01 à 09. La documentation n’étant pas claire sur ce point, il faut donc à priori faire notre propre interprétation lorsque l’on est face à des valeurs du type ‘45’ : s’agit-il de 04:05 ou de 04:50 ? Ou encore la valeur ‘1’ correspond à 00:01 ou à 01:00 ?
+- Les heures et minutes des accidents sont concaténées dans une seule colonne, avec omission des `0` devant les heures de 00 à 09 et devant les minutes de 01 à 09. La documentation n’étant pas claire sur ce point, il faut donc à priori faire notre propre interprétation lorsque l’on est face à des valeurs du type ‘45’ : s’agit-il de 04:05 ou de 04:50 ? Ou encore la valeur ‘1’ correspond à 00:01 ou à 01:00 ? Dans ce cas, j’ai considéré qu’il s’agissait d’heures (‘1’ = 01:00). Cela explique notamment pourquoi dans les graphiques par heures, il n’y a aucun accident entre minuit et 1h ... J’espère que cette colonne sera rapidement corrigée !
 
 La fonction `toDate()` va nous permettre de reconstruire un objet datetime à partir des différentes variables : 
 
@@ -224,7 +223,7 @@ top10 <- accidentsSpecifications %>%
 knitr::kable(top10, caption = "Top 10 des jours de l'année avec, en moyenne, le moins d'accidents")
 ```
 
-Attention, cela ne veut pas dire que les usagers de la route sont plus prudents pendant les vacances. Cela peut s'expliquer probablement et au moins en partie par le fait qu'il y a globalement moins de circulation durant les périodes de vacances, et donc moins d'accidents.
+Attention, cela ne veut pas forcément dire que les usagers de la route sont plus prudents pendant les vacances. On peut supposer notamment qu’il y globalement moins de circulation durant le mois d’août par rapport au reste de l’année, et ce, malgré les pics de départs et retours de vacances. On peut voir que c’est bien le cas à Paris si l’on en croit cet article publié sur francebleu.fr : [“Paris au mois d’août : ça roule mieux”](https://www.francebleu.fr/infos/societe/paris-au-mois-d-aout-ca-roule-mieux-1407207600). Pour pouvoir confirmer ce point, il faudrait cependant se reposer sur une véritable étude, ou pa exemple exploiter des statistiques provenant d’applications comme Waze si elles venaient à être mise à disposition.
 
 Il est également intéressant d'observer cette courbe par département. On peut voir par exemple qu'en été, le nombre d'accidents baisse sensiblement à Paris alors que dans la même période, il augmente dans le var.
 
@@ -410,6 +409,7 @@ accidentsVehicles %>%
     x = "Point de choc",
     y = "Nombre de voitures"
   ) +
+  scale_y_continuous(labels = function(n){format(n, scientific = FALSE)}) +
   theme_minimal() +
   coord_flip()
 ```
